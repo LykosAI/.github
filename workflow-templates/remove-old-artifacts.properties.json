@@ -1,0 +1,4 @@
+{
+    "name": "Remove old artifacts",
+    "description": "Removes artifacts older than 7 days on schedule."
+}
