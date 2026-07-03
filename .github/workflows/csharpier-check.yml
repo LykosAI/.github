@@ -1,0 +1,44 @@
+# Reusable CSharpier format check for LykosAI C# repos.
+#
+# Call from a repo's CI workflow with:
+#
+#   jobs:
+#     format:
+#       uses: LykosAI/.github/.github/workflows/csharpier-check.yml@main
+#
+# The calling repo must have a `.config/dotnet-tools.json` pinning `csharpier` —
+# the check runs the REPO's pinned version (via `dotnet tool restore`), never a
+# version this workflow chooses. CSharpier's output can change between versions,
+# so the pin is what keeps local pre-commit hooks and CI in exact agreement.
+name: CSharpier Check
+
+on:
+  workflow_call:
+    inputs:
+      dotnet-version:
+        description: .NET SDK version passed to actions/setup-dotnet
+        required: false
+        type: string
+        default: 10.0.x
+      path:
+        description: Directory to check, relative to the repo root
+        required: false
+        type: string
+        default: "."
+
+jobs:
+  csharpier:
+    name: Format check (CSharpier)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: Restore repo-pinned tools
+        run: dotnet tool restore
+
+      - name: CSharpier check
+        run: dotnet csharpier check ${{ inputs.path }}
