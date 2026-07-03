@@ -1,15 +1,27 @@
-# Reusable CSharpier format check for LykosAI C# repos.
+# Reusable CSharpier format check (and optional auto-fix) for LykosAI C# repos.
 #
 # Call from a repo's CI workflow with:
 #
 #   jobs:
 #     format:
+#       permissions:
+#         contents: write          # only needed when fix: true
 #       uses: LykosAI/.github/.github/workflows/csharpier-check.yml@main
+#       with:
+#         fix: true
 #
 # The calling repo must have a `.config/dotnet-tools.json` pinning `csharpier` —
 # the check runs the REPO's pinned version (via `dotnet tool restore`), never a
 # version this workflow chooses. CSharpier's output can change between versions,
 # so the pin is what keeps local pre-commit hooks and CI in exact agreement.
+#
+# Fix mode: when the check fails, run `csharpier format`, commit as
+# github-actions[bot], and push back to the branch (PR head branch, or the pushed
+# branch on push events). This covers commits that never went through the local
+# pre-commit hook — web-UI merges, conflict resolutions, and web edits.
+# Loop-safety: pushes made with GITHUB_TOKEN do not trigger new workflow runs,
+# so the auto-fix can never recurse. (Same reason the fix commit won't re-run
+# checks on itself — fine while merges aren't gated on required status checks.)
 name: CSharpier Check
 
 on:
@@ -25,6 +37,14 @@ on:
         required: false
         type: string
         default: "."
+      fix:
+        description: >-
+          When the check fails, push an auto-format commit to the branch instead
+          of just failing. Requires the caller to grant `contents: write`.
+          Same-repo branches only (fork PRs can't be pushed to).
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   csharpier:
@@ -32,6 +52,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Fix mode needs the real branch to push back to. On pull_request the
+          # default checkout is the detached merge ref (refs/pull/N/merge) — not
+          # pushable — so check out the PR head branch instead. On push events
+          # head_ref is empty and this falls through to the default (pushed ref).
+          ref: ${{ inputs.fix && github.head_ref || '' }}
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -41,4 +67,26 @@ jobs:
         run: dotnet tool restore
 
       - name: CSharpier check
+        id: check
+        # In fix mode a failure falls through to the fix step instead of failing
+        # the job; without fix this is the gate itself.
+        continue-on-error: ${{ inputs.fix }}
         run: dotnet csharpier check ${{ inputs.path }}
+
+      - name: Auto-fix and push
+        if: ${{ inputs.fix && steps.check.outcome == 'failure' }}
+        run: |
+          dotnet csharpier format ${{ inputs.path }}
+
+          if git diff --quiet; then
+            # Check failed but format changed nothing — e.g. a file csharpier
+            # can't parse. That's a real failure; surface it instead of green.
+            echo "::error::csharpier check failed but 'csharpier format' produced no changes — see the check step logs (likely a parse error)."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "style: csharpier auto-format (CI)"
+          git push origin "HEAD:${{ github.head_ref || github.ref_name }}"
+          echo "::notice::Pushed csharpier auto-format commit to ${{ github.head_ref || github.ref_name }}."
