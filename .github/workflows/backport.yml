@@ -1,0 +1,100 @@
+name: Backport
+
+# Reusable label-driven backport workflow (lifted from StabilityMatrix).
+#
+# Label a PR `backport-to-<branch>` and, once it merges, a cherry-picked PR
+# targeting `<branch>` is opened automatically. Conflicts are committed to the
+# backport branch for manual resolution rather than failing the run.
+#
+# Usage (in the calling repo, e.g. .github/workflows/backport.yml):
+#
+#   name: Automatic Backport
+#   on:
+#     pull_request:
+#       types: [closed, labeled]
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#     issues: write
+#   jobs:
+#     backport:
+#       uses: LykosAI/.github/.github/workflows/backport.yml@main
+#       secrets: inherit   # needed only for the lykos-backport App (see below)
+#
+# Attribution & CI: when the `lykos-backport` GitHub App is configured — org
+# (or repo) variable BACKPORT_APP_ID + secret BACKPORT_APP_PRIVATE_KEY, reached
+# via the caller's `secrets: inherit` — backport PRs are authored by the App
+# (its name/avatar) and, unlike GITHUB_TOKEN, DO trigger CI on the backport PR.
+# Without it, the workflow falls back to GITHUB_TOKEN and still works, minus
+# the App identity and the CI trigger.
+
+on:
+  workflow_call:
+    inputs:
+      target_pr_labels:
+        description: "Labels added to the created backport PR, as a JSON array string"
+        type: string
+        default: '["backport"]'
+      auto_backport_label_prefix:
+        description: "Label prefix that triggers a backport; the suffix names the target branch (e.g. backport-to-main)"
+        type: string
+        default: "backport-to-"
+      mainline:
+        description: >-
+          Parent number used when cherry-picking merge commits. 1 is the
+          base-branch side, which is correct for standard GitHub merge commits.
+        type: number
+        default: 1
+      pr_title:
+        description: "Title template for the backport PR"
+        type: string
+        default: "[{{sourceBranch}} to {{targetBranch}}] backport: {{sourcePullRequest.title}} ({{sourcePullRequest.number}})"
+
+jobs:
+  backport:
+    name: Backport PR
+    if: >-
+      github.event.pull_request.merged == true &&
+      contains(join(github.event.pull_request.labels.*.name, ','), inputs.auto_backport_label_prefix)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      # Mint an installation token for the lykos-backport App when configured.
+      # The `if` gates on a non-sensitive variable (secrets can't be read in
+      # `if`); when it's unset the step is skipped and we fall back below.
+      - name: Generate app token
+        id: app-token
+        if: vars.BACKPORT_APP_ID != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.BACKPORT_APP_ID }}
+          private-key: ${{ secrets.BACKPORT_APP_PRIVATE_KEY }}
+
+      - name: Write backport config
+        run: |
+          cat > .backportrc.json << 'EOF'
+          {
+            "targetPRLabels": ${{ inputs.target_pr_labels }},
+            "mainline": ${{ inputs.mainline }},
+            "commitConflicts": true,
+            "prTitle": "${{ inputs.pr_title }}"
+          }
+          EOF
+          cat .backportrc.json
+
+      - name: Backport Action
+        uses: sorenlouv/backport-github-action@v9.5.1
+        with:
+          github_token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          auto_backport_label_prefix: ${{ inputs.auto_backport_label_prefix }}
+
+      - name: Info log
+        if: ${{ success() }}
+        run: cat ~/.backport/backport.info.log
+
+      - name: Debug log
+        if: ${{ failure() }}
+        run: cat ~/.backport/backport.debug.log
