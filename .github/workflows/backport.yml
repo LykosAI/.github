@@ -1,0 +1,89 @@
+name: Backport
+
+# Reusable label-driven backport workflow (lifted from StabilityMatrix).
+#
+# Label a PR `backport-to-<branch>` and, once it merges, a cherry-picked PR
+# targeting `<branch>` is opened automatically. Conflicts are committed to the
+# backport branch for manual resolution rather than failing the run.
+#
+# Usage (in the calling repo, e.g. .github/workflows/backport.yml):
+#
+#   name: Automatic Backport
+#   on:
+#     pull_request:
+#       types: [closed, labeled]
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#     issues: write
+#   jobs:
+#     backport:
+#       uses: LykosAI/.github/.github/workflows/backport.yml@main
+#
+# Note: PRs created with the default GITHUB_TOKEN do not trigger other
+# workflows (CI on the backport PR). Pass a PAT/App token via the `token`
+# secret if that matters for your repo.
+
+on:
+  workflow_call:
+    inputs:
+      target_pr_labels:
+        description: "Labels added to the created backport PR, as a JSON array string"
+        type: string
+        default: '["backport"]'
+      auto_backport_label_prefix:
+        description: "Label prefix that triggers a backport; the suffix names the target branch (e.g. backport-to-main)"
+        type: string
+        default: "backport-to-"
+      mainline:
+        description: >-
+          Parent number used when cherry-picking merge commits. 1 is the
+          base-branch side, which is correct for standard GitHub merge commits.
+        type: number
+        default: 1
+      pr_title:
+        description: "Title template for the backport PR"
+        type: string
+        default: "[{{sourceBranch}} to {{targetBranch}}] backport: {{sourcePullRequest.title}} ({{sourcePullRequest.number}})"
+    secrets:
+      token:
+        description: "Token used to create the backport branch and PR. Defaults to GITHUB_TOKEN."
+        required: false
+
+jobs:
+  backport:
+    name: Backport PR
+    if: >-
+      github.event.pull_request.merged == true &&
+      contains(join(github.event.pull_request.labels.*.name, ','), inputs.auto_backport_label_prefix)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Write backport config
+        run: |
+          cat > .backportrc.json << 'EOF'
+          {
+            "targetPRLabels": ${{ inputs.target_pr_labels }},
+            "mainline": ${{ inputs.mainline }},
+            "commitConflicts": true,
+            "prTitle": "${{ inputs.pr_title }}"
+          }
+          EOF
+          cat .backportrc.json
+
+      - name: Backport Action
+        uses: sorenlouv/backport-github-action@v9.5.1
+        with:
+          github_token: ${{ secrets.token || secrets.GITHUB_TOKEN }}
+          auto_backport_label_prefix: ${{ inputs.auto_backport_label_prefix }}
+
+      - name: Info log
+        if: ${{ success() }}
+        run: cat ~/.backport/backport.info.log
+
+      - name: Debug log
+        if: ${{ failure() }}
+        run: cat ~/.backport/backport.debug.log
