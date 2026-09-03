@@ -82,12 +82,16 @@ jobs:
     steps:
       # The script ships with this workflow; pin it to the same commit so a caller on
       # @main always runs the script that matches the workflow it resolved.
+      # job.workflow_sha is the documented name; github.job_workflow_sha the older one.
       - uses: actions/checkout@v4
         with:
           repository: LykosAI/.github
-          ref: ${{ github.job_workflow_sha }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
           sparse-checkout: pr-triage
           path: lykos-triage
+
+      - name: Script commit
+        run: git -C lykos-triage log -1 --format='pr-triage/triage.py @ %H'
 
       - name: Triage
         env:
