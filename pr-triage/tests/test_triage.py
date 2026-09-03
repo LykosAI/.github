@@ -137,6 +137,12 @@ class DecisionTests(unittest.TestCase):
         self.assertFalse(outcome.approve)
         self.assertEqual(outcome.status, "outside")
 
+    def test_workflow_change_must_not_approve_even_inside_a_wide_envelope(self):
+        wide = Envelope.parse("**")
+        outcome = decide(facts(paths=["docs/a.md", ".github/workflows/ci.yml"]), wide, APPROVE)
+        self.assertFalse(outcome.approve)
+        self.assertTrue(any(".github/workflows/ci.yml" in b for b in outcome.blockers))
+
     def test_rename_out_of_envelope_must_not_approve(self):
         outcome = decide(facts(paths=["docs/moved.md", "src/old.cs"]), self.envelope, APPROVE)
         self.assertFalse(outcome.approve)
