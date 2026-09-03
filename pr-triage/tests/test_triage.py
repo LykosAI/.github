@@ -79,6 +79,22 @@ class EnvelopeTests(unittest.TestCase):
         self.assertFalse(env.covers("README.md"))
 
 
+class SystemPromptTests(unittest.TestCase):
+    def test_prompt_lists_every_glob_and_the_dot_github_rule(self):
+        env = Envelope.parse("docs/**\n**/*.md\nLykos.Chat.Core.csproj")
+        prompt = env.system_prompt()
+        for glob in ("docs/**", "**/*.md", "Lykos.Chat.Core.csproj"):
+            with self.subTest(glob=glob):
+                self.assertIn(f"`{glob}`", prompt)
+        self.assertIn("`.github/`", prompt)
+        self.assertNotIn("markdown only", prompt)
+
+    def test_prompt_lists_the_default_envelope_when_none_is_given(self):
+        prompt = Envelope.parse(None).system_prompt()
+        self.assertIn("`docs/**`", prompt)
+        self.assertIn("`**/*.md`", prompt)
+
+
 class ChangedPathsTests(unittest.TestCase):
     def test_rename_contributes_both_names(self):
         files = [{"filename": "docs/new.md", "previous_filename": "src/old.cs", "status": "renamed"}]

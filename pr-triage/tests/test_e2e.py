@@ -161,14 +161,14 @@ class E2ETests(unittest.TestCase):
         with open(self.event_path, "w", encoding="utf-8") as f:
             json.dump(event, f)
 
-    def run_script(self, endpoint=None):
+    def run_script(self, endpoint=None, envelope="docs/**\n**/*.md"):
         env = dict(
             os.environ,
             GITHUB_EVENT_PATH=self.event_path,
             GITHUB_REPOSITORY="LykosAI/Test",
             GITHUB_API_URL=f"http://127.0.0.1:{self.port}/github",
             GITHUB_TOKEN="ghs_fake",
-            TRIAGE_ENVELOPE="docs/**\n**/*.md",
+            TRIAGE_ENVELOPE=envelope,
             TRIAGE_MODEL="fake-model",
             TRIAGE_ENDPOINT=endpoint or f"http://127.0.0.1:{self.port}/v1",
             TRIAGE_SIGNATURE=SIGNATURE,
@@ -200,6 +200,26 @@ class E2ETests(unittest.TestCase):
         self.assertEqual(self.state.model_headers.get("authorization"), "Bearer llm-key-value")
         for secret in ("cf-id-value", "cf-secret-value", "llm-key-value"):
             self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_widened_envelope_approves_a_non_markdown_path_and_tells_the_model(self):
+        self.state.files = [{"filename": "Lykos.Chat.Core.csproj", "status": "modified"}]
+        self.state.diff = "--- a/Lykos.Chat.Core.csproj\n+++ b/Lykos.Chat.Core.csproj\n@@ -1 +1 @@\n-<Version>0.29.0</Version>\n+<Version>0.30.0</Version>\n"
+        self.state.model_reply = '{"verdict": "approve", "reason": "a plain version bump :bcnod:"}'
+        result = self.run_script(envelope="docs/**\n**/*.md\nLykos.Chat.Core.csproj")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reviews = self.calls("POST", "/pulls/7/reviews")
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0][2]["event"], "APPROVE")
+        system = self.calls("POST", "/v1/chat/completions")[0][2]["messages"][0]["content"]
+        self.assertIn("`Lykos.Chat.Core.csproj`", system)
+        self.assertIn("`.github/`", system)
+
+    def test_default_envelope_still_refuses_the_same_csproj_path(self):
+        self.state.files = [{"filename": "Lykos.Chat.Core.csproj", "status": "modified"}]
+        self.state.model_reply = '{"verdict": "approve", "reason": "a plain version bump :bcnod:"}'
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual(self.calls("POST", "/pulls/7/reviews"), [])
+        self.assertEqual(len(self.calls("POST", "/issues/7/comments")), 1)
 
     def test_model_request_shape(self):
         self.state.model_reply = '{"verdict": "human", "reason": "hm"}'
