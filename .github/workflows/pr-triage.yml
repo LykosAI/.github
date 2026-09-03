@@ -1,0 +1,106 @@
+# Reusable PR triage: a local model reads a pull request and either approves it or
+# asks for a human. The model can only WITHHOLD approval. Approval is granted only
+# when every mechanical check in pr-triage/triage.py passes (author has write access
+# per the collaborator API, every changed path is inside the envelope, nothing under
+# .github/ ever is, the diff was read in full) AND the model answered approve.
+# Everything else posts or edits one triage comment. An unreachable model, an
+# unparseable answer or an API failure is the same comment path with exit 0: the job
+# never blocks a PR and never fails red on its own outage.
+#
+# Call from a repo with (the base branch's copy of this file runs, never the PR's):
+#
+#   name: PR Triage
+#   on:
+#     pull_request_target:
+#       types: [opened, synchronize, reopened]
+#   permissions:
+#     pull-requests: write
+#     contents: read
+#   jobs:
+#     triage:
+#       uses: LykosAI/.github/.github/workflows/pr-triage.yml@main
+#       secrets: inherit
+#       with:
+#         envelope: |
+#           docs/**
+#           **/*.md
+#
+# Secrets are org-level (CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, LLM_API_KEY)
+# and reach this workflow through the caller's `secrets: inherit`. They are passed to
+# the script as environment variables and never printed. Nothing from the PR is ever
+# checked out: the changed files and the diff are read through the GitHub API, and
+# the only checkout below is this repository at the same commit as this workflow file.
+#
+# GITHUB_TOKEN can submit an approving review only while the repo or org setting
+# "Allow GitHub Actions to create and approve pull requests" is on; when it is off the
+# approval call fails and the run lands on the human comment, which is the safe side.
+name: PR Triage
+
+on:
+  workflow_call:
+    inputs:
+      envelope:
+        description: >-
+          Newline-separated globs of paths an auto-approvable PR may touch. `**` spans
+          directories; `*` and `?` stay within one segment. Paths under `.github/` are
+          excluded whatever the globs say.
+        required: false
+        type: string
+        default: |
+          docs/**
+          **/*.md
+      model:
+        description: Model name sent to the chat-completions endpoint
+        required: false
+        type: string
+        default: qwen36-27b-fable-fusion-mtp
+      endpoint:
+        description: OpenAI-compatible base URL (chat/completions is appended)
+        required: false
+        type: string
+        default: https://llm.ionite.io/v1
+      signature:
+        description: Trailing line on every review and comment the triage posts
+        required: false
+        type: string
+        default: "🐾 Lykos Pup (fable-fusion on Freya)"
+    secrets:
+      CF_ACCESS_CLIENT_ID:
+        required: false
+      CF_ACCESS_CLIENT_SECRET:
+        required: false
+      LLM_API_KEY:
+        required: false
+
+jobs:
+  triage:
+    name: Triage
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      # The script ships with this workflow; pin it to the same commit so a caller on
+      # @main always runs the script that matches the workflow it resolved.
+      # job.workflow_sha is the documented name; github.job_workflow_sha the older one.
+      - uses: actions/checkout@v4
+        with:
+          repository: LykosAI/.github
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          sparse-checkout: pr-triage
+          path: lykos-triage
+
+      - name: Script commit
+        run: git -C lykos-triage log -1 --format='pr-triage/triage.py @ %H'
+
+      - name: Triage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRIAGE_ENVELOPE: ${{ inputs.envelope }}
+          TRIAGE_MODEL: ${{ inputs.model }}
+          TRIAGE_ENDPOINT: ${{ inputs.endpoint }}
+          TRIAGE_SIGNATURE: ${{ inputs.signature }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: python3 lykos-triage/pr-triage/triage.py
