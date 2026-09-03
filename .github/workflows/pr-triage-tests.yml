@@ -1,0 +1,29 @@
+# Unit and local end-to-end tests for pr-triage/triage.py (stdlib only, no network:
+# the e2e half runs the script against a fake GitHub API and a fake model server on
+# localhost).
+name: PR Triage Tests
+
+on:
+  pull_request:
+    paths:
+      - pr-triage/**
+      - .github/workflows/pr-triage.yml
+      - .github/workflows/pr-triage-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - pr-triage/**
+      - .github/workflows/pr-triage.yml
+      - .github/workflows/pr-triage-tests.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s pr-triage/tests -v
