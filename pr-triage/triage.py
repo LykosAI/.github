@@ -28,6 +28,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
@@ -315,10 +316,32 @@ def render_comment_body(
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, body: str):
+    def __init__(self, status: int, body: str, headers: dict[str, str] | None = None):
         super().__init__(f"HTTP {status}: {body[:300]}")
         self.status = status
         self.body = body
+        self.headers = headers or {}
+
+
+class ModelReplyError(Exception):
+    """The model endpoint answered with something other than a chat completion.
+
+    The message is safe to log: status, final URL, content type, redirect host and a
+    capped body prefix; never a request header value.
+    """
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+@dataclass(frozen=True)
+class HttpResponse:
+    status: int
+    body: str
+    headers: dict[str, str]
+    url: str
 
 
 def http(
@@ -327,18 +350,20 @@ def http(
     headers: dict[str, str],
     body: Any = None,
     timeout: float = GITHUB_TIMEOUT_SECONDS,
-) -> tuple[int, str, dict[str, str]]:
+    follow_redirects: bool = True,
+) -> HttpResponse:
     data = None
     req_headers = dict(headers)
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         req_headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, method=method, headers=req_headers)
+    opener = urllib.request.build_opener() if follow_redirects else urllib.request.build_opener(_NoRedirect())
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read().decode("utf-8", "replace"), dict(resp.headers)
+        with opener.open(req, timeout=timeout) as resp:
+            return HttpResponse(resp.status, resp.read().decode("utf-8", "replace"), dict(resp.headers), resp.geturl())
     except urllib.error.HTTPError as e:
-        raise HttpError(e.code, e.read().decode("utf-8", "replace")) from e
+        raise HttpError(e.code, e.read().decode("utf-8", "replace"), dict(e.headers)) from e
 
 
 class GitHub:
@@ -356,8 +381,7 @@ class GitHub:
         return f"{self.api_url}/repos/{self.repo}{path}"
 
     def get_json(self, path: str) -> Any:
-        _, text, _ = http("GET", self._url(path), self.headers)
-        return json.loads(text)
+        return json.loads(http("GET", self._url(path), self.headers).body)
 
     def get_paginated(self, path: str) -> list[Any]:
         items: list[Any] = []
@@ -372,8 +396,7 @@ class GitHub:
 
     def get_diff(self, number: int) -> str:
         headers = dict(self.headers, Accept="application/vnd.github.diff")
-        _, text, _ = http("GET", self._url(f"/pulls/{number}"), headers)
-        return text
+        return http("GET", self._url(f"/pulls/{number}"), headers).body
 
     def author_permission(self, login: str) -> str | None:
         try:
@@ -433,6 +456,17 @@ def ask_model(
     system_prompt: str,
     user_content: str,
 ) -> str | None:
+    log(
+        "Model credentials in the environment: "
+        + ", ".join(
+            f"{name} present={bool(value)} len={len(value)}"
+            for name, value in (
+                ("CF_ACCESS_CLIENT_ID", cf_id),
+                ("CF_ACCESS_CLIENT_SECRET", cf_secret),
+                ("LLM_API_KEY", api_key),
+            )
+        )
+    )
     headers = {
         "Authorization": f"Bearer {api_key}",
         "CF-Access-Client-Id": cf_id,
@@ -449,14 +483,30 @@ def ask_model(
         "max_tokens": 2500,
         "reasoning_effort": "low",
     }
-    _, text, _ = http(
-        "POST",
-        endpoint.rstrip("/") + "/chat/completions",
-        headers,
-        payload,
-        timeout=MODEL_TIMEOUT_SECONDS,
-    )
-    data = json.loads(text)
+    try:
+        resp = http(
+            "POST",
+            endpoint.rstrip("/") + "/chat/completions",
+            headers,
+            payload,
+            timeout=MODEL_TIMEOUT_SECONDS,
+            follow_redirects=False,
+        )
+    except HttpError as e:
+        if 300 <= e.status < 400:
+            location = e.headers.get("Location") or e.headers.get("location") or ""
+            host = urllib.parse.urlsplit(location).netloc or "(no Location header)"
+            raise ModelReplyError(f"HTTP {e.status} redirect to {host}; an Access login page means the service token was not accepted") from e
+        raise
+    content_type = resp.headers.get("Content-Type") or resp.headers.get("content-type") or "(none)"
+    try:
+        data = json.loads(resp.body)
+    except json.JSONDecodeError as e:
+        raise ModelReplyError(
+            f"non-JSON reply: HTTP {resp.status} from {resp.url}, Content-Type {content_type}, body starts {resp.body[:120]!r}"
+        ) from e
+    if not isinstance(data, dict):
+        raise ModelReplyError(f"JSON reply is not an object: HTTP {resp.status} from {resp.url}, body starts {resp.body[:120]!r}")
     choices = data.get("choices") or []
     if not choices:
         return None

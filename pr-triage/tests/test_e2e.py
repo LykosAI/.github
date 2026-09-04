@@ -25,6 +25,7 @@ class FakeState:
         self.calls = []  # (method, path, body_dict_or_None)
         self.model_reply = None  # str content, or Exception subclass to raise, or dict for raw payload
         self.model_status = 200
+        self.model_mode = "json"  # json | redirect | html
         self.files = [{"filename": "docs/architecture.md", "status": "modified"}]
         self.diff = "--- a/docs/architecture.md\n+++ b/docs/architecture.md\n@@ -1 +1 @@\n-old\n+new\n"
         self.permission = "admin"
@@ -72,11 +73,24 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/v1/chat/completions":
             s.model_headers = {k.lower(): v for k, v in self.headers.items()}
+            if s.model_mode == "redirect":
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{self.server.server_address[1]}/cdn-cgi/access/login/llm.ionite.io?kid=abc")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if s.model_mode == "html":
+                page = "<!DOCTYPE html><html><head><title>Sign in · Cloudflare Access</title></head><body>" + "login " * 40 + "</body></html>"
+                assert len(page) > 200  # the 120-char cap must be measurable
+                return self._send(200, page, "text/html; charset=utf-8")
             if s.model_status != 200:
                 return self._send(s.model_status, {"error": "nope"})
             if isinstance(s.model_reply, dict):
                 return self._send(200, s.model_reply)
             return self._send(200, {"choices": [{"message": {"role": "assistant", "content": s.model_reply}}]})
+
+        if path.startswith("/cdn-cgi/access/login"):
+            return self._send(200, "<html>followed the redirect</html>", "text/html")
 
         prefix = "/github/repos/LykosAI/Test"
         if not path.startswith(prefix):
@@ -316,6 +330,82 @@ class E2ETests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(self.calls("POST", "/pulls/7/reviews"), [])
         self.assertEqual(len(self.calls("POST", "/issues/7/comments")), 1)
+
+    def test_access_redirect_is_reported_as_a_302_and_never_followed(self):
+        self.state.model_mode = "redirect"
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls("POST", "/pulls/7/reviews"), [])
+        self.assertIn("could not reach my model", self.calls("POST", "/issues/7/comments")[0][2]["body"])
+        self.assertEqual(len(self.calls("POST", "/v1/chat/completions")), 1)
+        self.assertEqual([c for c in self.state.calls if c[1].startswith("/cdn-cgi/")], [])
+        warning = [l for l in result.stdout.splitlines() if "::warning::Model unreachable" in l][0]
+        self.assertIn("ModelReplyError", warning)
+        self.assertIn("HTTP 302 redirect to 127.0.0.1", warning)
+        self.assertNotIn("kid=abc", warning)
+        for secret in ("cf-id-value", "cf-secret-value", "llm-key-value"):
+            self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_html_200_is_reported_with_status_url_content_type_and_capped_body(self):
+        self.state.model_mode = "html"
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls("POST", "/pulls/7/reviews"), [])
+        self.assertIn("could not reach my model", self.calls("POST", "/issues/7/comments")[0][2]["body"])
+        warning = [l for l in result.stdout.splitlines() if "::warning::Model unreachable" in l][0]
+        self.assertIn("non-JSON reply: HTTP 200 from http://127.0.0.1:", warning)
+        self.assertIn("/v1/chat/completions", warning)
+        self.assertIn("Content-Type text/html; charset=utf-8", warning)
+        self.assertIn("<!DOCTYPE html><html><head><title>Sign in", warning)
+        self.assertNotIn("</html>", warning)  # capped well before the end of the body
+        for secret in ("cf-id-value", "cf-secret-value", "llm-key-value"):
+            self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_credential_presence_line_carries_booleans_and_lengths_only(self):
+        self.state.model_reply = '{"verdict": "human", "reason": "hm"}'
+        result = self.run_script()
+        line = [l for l in result.stdout.splitlines() if l.startswith("Model credentials in the environment:")][0]
+        self.assertIn("CF_ACCESS_CLIENT_ID present=True len=11", line)
+        self.assertIn("CF_ACCESS_CLIENT_SECRET present=True len=15", line)
+        self.assertIn("LLM_API_KEY present=True len=13", line)
+        for secret in ("cf-id-value", "cf-secret-value", "llm-key-value"):
+            self.assertNotIn(secret, line)
+
+    def test_missing_credentials_show_as_absent(self):
+        self.state.model_reply = '{"verdict": "human", "reason": "hm"}'
+        env = dict(
+            os.environ,
+            GITHUB_EVENT_PATH=self.event_path,
+            GITHUB_REPOSITORY="LykosAI/Test",
+            GITHUB_API_URL=f"http://127.0.0.1:{self.port}/github",
+            GITHUB_TOKEN="ghs_fake",
+            TRIAGE_MODEL="fake-model",
+            TRIAGE_ENDPOINT=f"http://127.0.0.1:{self.port}/v1",
+            CF_ACCESS_CLIENT_ID="",
+            PYTHONIOENCODING="utf-8",
+        )
+        env.pop("CF_ACCESS_CLIENT_SECRET", None)
+        env.pop("LLM_API_KEY", None)
+        result = subprocess.run([sys.executable, SCRIPT], env=env, capture_output=True, text=True, encoding="utf-8", timeout=60)
+        line = [l for l in result.stdout.splitlines() if l.startswith("Model credentials in the environment:")][0]
+        self.assertIn("CF_ACCESS_CLIENT_ID present=False len=0", line)
+        self.assertIn("CF_ACCESS_CLIENT_SECRET present=False len=0", line)
+        self.assertIn("LLM_API_KEY present=False len=0", line)
+
+    def test_ask_model_raises_a_diagnosable_error_on_redirect_and_html(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        import triage
+
+        endpoint = f"http://127.0.0.1:{self.port}/v1"
+        self.state.model_mode = "redirect"
+        with self.assertRaises(triage.ModelReplyError) as ctx:
+            triage.ask_model(endpoint, "m", "k", "i", "s", "sys", "user")
+        self.assertIn("HTTP 302 redirect to 127.0.0.1", str(ctx.exception))
+        self.state.model_mode = "html"
+        with self.assertRaises(triage.ModelReplyError) as ctx:
+            triage.ask_model(endpoint, "m", "k", "i", "s", "sys", "user")
+        self.assertIn("non-JSON reply: HTTP 200", str(ctx.exception))
+        self.assertIn("text/html", str(ctx.exception))
 
     def test_github_outage_exits_zero(self):
         self.state.model_reply = '{"verdict": "approve", "reason": "ok"}'
