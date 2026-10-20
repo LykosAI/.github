@@ -79,7 +79,7 @@ jobs:
           skip() { echo "::notice title=Preview not deployed::$1"; echo "deploy=false" >> "$GITHUB_OUTPUT"; exit 0; }
           [ "$EVENT" = "pull_request" ] || skip "Previews deploy for pull_request events only (this is $EVENT)."
           [ "$HEAD_REPO" = "$REPO" ] || skip "PR from a fork ($HEAD_REPO): no credentials are passed to it."
-          [ "$HAS_TOKEN" = "true" ] || skip "CLOUDFLARE_API_TOKEN is not set for this repository."
+          [ "$HAS_TOKEN" = "true" ] || skip "No CLOUDFLARE_API_TOKEN reached this run (not set for the org or the repository)."
           [ -n "$ACCOUNT_ID" ] || skip "No Cloudflare account id was passed (vars.CLOUDFLARE_ACCOUNT_ID is not set)."
           echo "deploy=true" >> "$GITHUB_OUTPUT"
 
